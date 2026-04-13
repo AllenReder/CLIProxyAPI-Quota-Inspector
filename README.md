@@ -6,67 +6,31 @@
 
 ![CLIProxyAPI Quota Inspector](./img.png)
 
-Live provider-aware quota inspector for CPA management APIs.
+A cross-platform quota inspector for CLIProxyAPI / CPA.
 
-This project queries real quota data from a running CPA instance and renders provider-specific terminal sections with status coloring, quota bars, and multi-account summaries.
-
-## Why this tool
-
-- Uses live data from CPA management routes instead of offline estimation.
-- Shows provider-specific sections instead of forcing one shared table schema.
-- Shows Codex `5h` and `7d` quota windows.
-- Shows Gemini CLI grouped model quota sections and supplemental tier information.
-- Aggregates equivalent quota percentages per plan (`free`, `plus`).
-- Supports progress display while querying many auth files.
-
-## Data source
-
-The tool mirrors CPA management flow for currently supported providers:
-
-1. `GET /v0/management/auth-files`
-2. `POST /v0/management/api-call`
-3. CPA forwards provider-specific upstream requests
-
-Currently implemented:
-
-- Codex -> `https://chatgpt.com/backend-api/wham/usage`
-- Gemini CLI -> `https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota`
-- Gemini CLI supplemental tier info -> `https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist`
-
-## Status model
-
-Codex status is derived from `7d` remaining percentage:
-
-- `0` -> `exhausted`
-- `0-30` -> `low`
-- `30-70` -> `medium`
-- `70-100` -> `high`
-- `100` -> `full`
-
-Gemini CLI status uses the same levels, but is derived from the average remaining percentage across all recognized model quota buckets:
-
-- `0` -> `exhausted`
-- `0-30` -> `low`
-- `30-70` -> `medium`
-- `70-100` -> `high`
-- `100` -> `full`
+It reads live data from a running CPA service and shows provider-based quota sections, statuses, progress bars, and summary statistics in the terminal.
 
 ## Features
 
-- Static report output (default) with colored plan and status.
-- Provider-specific sections with independent columns and sorting.
-- Terminal-width adaptive table layout.
-- Unicode gradient quota bars with `--ascii-bars` fallback.
-- Optional real-time fetch progress with current auth file name.
-- Supports `pretty`, `plain`, and `json` output modes.
-- `plain` and `json` also expose provider-specific summaries.
-- Retry for transient query failures.
+- View Codex `5h` / `7d` quotas
+- View Gemini CLI model quotas
+- View Antigravity model quotas
+- Show results in separate provider sections
+- Summarize accounts by plan, status, and remaining quota
+- Support batch inspection for many auth files
+
+## Supported providers
+
+- Codex
+- Gemini CLI
+- Antigravity
+- More providers coming soon
 
 ## Requirements
 
-- Go `1.25+`
-- Running CPA service
-- CPA management key (if enabled)
+- A running CPA service
+- Available auth files already configured
+- A management key if CPA management auth is enabled
 
 ## Build
 
@@ -80,50 +44,42 @@ go build -o cpa-quota-inspector .
 ./cpa-quota-inspector -k YOUR_MANAGEMENT_KEY
 ```
 
-## CLI flags
+The default CPA endpoint is `http://127.0.0.1:8317`.
 
+## Common flags
+
+- `-k`, `--management-key`: CPA management key
 - `--cpa-base-url`: CPA base URL, default `http://127.0.0.1:8317`
-- `--management-key`, `-k`: management bearer key
-- `--concurrency`: concurrent quota workers, default `32`
-- `--timeout`: HTTP timeout seconds
-- `--retry-attempts`: transient retry count
-- `--version`: print version/build metadata
-- `--filter-plan`: filter by `plan_type`
-- `--filter-provider`: filter by provider, such as `codex` or `gemini-cli`
-- `--filter-status`: filter by status
-- `--json`: print JSON payload
-- `--plain`: plain text output
-- `--summary-only`: summary only
-- `--ascii-bars`: ASCII quota bars instead of Unicode bars
-- `--no-progress`: disable fetch progress line
+- `--concurrency`: concurrent workers, default `32`
+- `--timeout`: request timeout in seconds
+- `--retry-attempts`: retry count after failed queries
+- `--filter-provider`: show only the specified provider
+- `--filter-plan`: show only the specified plan type
+- `--filter-status`: show only the specified status
+- `--json`: print JSON output
+- `--plain`: print plain text output
+- `--summary-only`: show summary only
+- `--ascii-bars`: use ASCII progress bars
+- `--no-progress`: disable fetch progress display
+- `--version`: print version information
 
 ## Examples
 
-JSON output:
+Show all accounts:
+
+```bash
+./cpa-quota-inspector -k YOUR_MANAGEMENT_KEY
+```
+
+Show only Codex:
 
 ```bash
 ./cpa-quota-inspector \
-  --json \
+  --filter-provider codex \
   -k YOUR_MANAGEMENT_KEY
 ```
 
-Disable progress line:
-
-```bash
-./cpa-quota-inspector \
-  --no-progress \
-  -k YOUR_MANAGEMENT_KEY
-```
-
-ASCII bars:
-
-```bash
-./cpa-quota-inspector \
-  --ascii-bars \
-  -k YOUR_MANAGEMENT_KEY
-```
-
-Only show Gemini CLI:
+Show only Gemini CLI:
 
 ```bash
 ./cpa-quota-inspector \
@@ -131,58 +87,38 @@ Only show Gemini CLI:
   -k YOUR_MANAGEMENT_KEY
 ```
 
-Print version metadata:
+Show summary only:
 
 ```bash
-./cpa-quota-inspector --version
+./cpa-quota-inspector \
+  --summary-only \
+  -k YOUR_MANAGEMENT_KEY
 ```
 
-## Sorting and summary
-
-- Default order is provider-aware:
-  - Codex: plan rank (`free`, `team`, `plus`, others) then ascending `7d` remaining
-  - Gemini CLI: status, then available model information, then file name
-- Terminal summary is split by provider:
-  - Codex: `Accounts`, `Plans`, `Statuses`, `Free Equivalent 7d`, `Plus Equivalent 7d`
-  - Gemini CLI: `Accounts`, `Plans`, `Statuses`, and per-group `Equivalent` metrics
-- JSON output includes both global `summary` and `provider_summaries`
-
-## Project structure
-
-- `main.go`: CLI entrypoint and orchestration
-- `types.go`: constants and data models
-- `fetch.go`: shared management API calls, filtering, summaries
-- `providers.go`: provider registry and provider-specific quota queries
-- `render.go`: terminal report rendering
-- `helpers.go`: shared helpers and formatting utilities
-
-## Development
-
-Format and test:
+Print JSON:
 
 ```bash
-gofmt -w *.go
-go test ./...
+./cpa-quota-inspector \
+  --json \
+  -k YOUR_MANAGEMENT_KEY
 ```
 
-## Release
-
-Create and push a semantic tag:
+Disable progress display:
 
 ```bash
-git checkout main
-git pull
-git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
+./cpa-quota-inspector \
+  --no-progress \
+  -k YOUR_MANAGEMENT_KEY
 ```
 
-Build multi-platform artifacts with GoReleaser:
+## Output
 
-```bash
-goreleaser release --clean
-```
+- Auth file name
+- Provider / plan / status
+- Quota progress bars
+- Per-provider summary statistics
 
 ## Notes
 
-- Code review quota is intentionally not displayed.
-- Current multi-provider support is `Codex + Gemini CLI`.
+- Code review quota is not shown
+- Current support includes `Codex + Gemini CLI + Antigravity`

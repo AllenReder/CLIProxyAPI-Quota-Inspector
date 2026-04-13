@@ -15,6 +15,9 @@ const (
 	whamUsageURL           = "https://chatgpt.com/backend-api/wham/usage"
 	geminiLoadCodeAssist   = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
 	geminiRetrieveQuotaURL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
+	antigravityModelsURL   = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
+	antigravityDailyURL    = "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
+	antigravitySandboxURL  = "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:fetchAvailableModels"
 )
 
 var whamHeaders = map[string]string{
@@ -85,6 +88,7 @@ type summary struct {
 	FreeEquivalent7D  float64            `json:"free_equivalent_7d"`
 	PlusEquivalent7D  float64            `json:"plus_equivalent_7d"`
 	GeminiEquivalents map[string]float64 `json:"gemini_equivalents,omitempty"`
+	AntigravityEquivs map[string]float64 `json:"antigravity_equivalents,omitempty"`
 }
 
 type providerSummaryRow struct {

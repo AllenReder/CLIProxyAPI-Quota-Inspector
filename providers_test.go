@@ -58,7 +58,7 @@ func TestPopulateGeminiReport(t *testing.T) {
 		},
 	}
 
-	populateGeminiReport(&report, payload)
+	populateGoogleAssistReport(&report, payload)
 
 	if report.PlanType != "standard-tier" {
 		t.Fatalf("plan_type = %q, want standard-tier", report.PlanType)
@@ -68,6 +68,22 @@ func TestPopulateGeminiReport(t *testing.T) {
 	}
 	if report.MetaFields["channel"] != "Preview Channel" {
 		t.Fatalf("channel = %q, want Preview Channel", report.MetaFields["channel"])
+	}
+}
+
+func TestProviderDefinitionsIncludeAntigravity(t *testing.T) {
+	defs := providerDefinitions()
+	found := false
+	for _, def := range defs {
+		if def.ID == "antigravity" {
+			found = true
+			if def.SectionTitle != "Antigravity" {
+				t.Fatalf("antigravity section title = %q, want Antigravity", def.SectionTitle)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("providerDefinitions() missing antigravity provider")
 	}
 }
 

@@ -28,7 +28,45 @@ func providerDefinitions() []*providerDef {
 			},
 			QueryReport: queryGeminiQuota,
 		},
+		{
+			ID:           "antigravity",
+			SectionTitle: "Antigravity",
+			LoadAuths: func(ctx context.Context, cfg config) ([]authEntry, error) {
+				return loadProviderAuths(ctx, cfg, "antigravity")
+			},
+			QueryReport: queryAntigravityQuota,
+		},
 	}
+}
+
+var (
+	geminiLoadMetadata = map[string]string{
+		"ideType":    "IDE_UNSPECIFIED",
+		"platform":   "PLATFORM_UNSPECIFIED",
+		"pluginType": "GEMINI",
+	}
+	antigravityLoadMetadata = map[string]string{
+		"ideType":    "ANTIGRAVITY",
+		"platform":   "PLATFORM_UNSPECIFIED",
+		"pluginType": "GEMINI",
+	}
+	antigravityModelGroups = []namedModelGroup{
+		{ID: "claude-gpt", Label: "Claude/GPT", ModelIDs: []string{"claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium"}},
+		{ID: "gemini-3-1-pro-series", Label: "Gemini 3.1 Pro Series", ModelIDs: []string{"gemini-3.1-pro-high", "gemini-3.1-pro-low"}},
+		{ID: "gemini-3-pro", Label: "Gemini 3 Pro", ModelIDs: []string{"gemini-3-pro-high", "gemini-3-pro-low"}},
+		{ID: "gemini-2-5-flash", Label: "Gemini 2.5 Flash", ModelIDs: []string{"gemini-2.5-flash", "gemini-2.5-flash-thinking"}},
+		{ID: "gemini-2-5-flash-lite", Label: "Gemini 2.5 Flash Lite", ModelIDs: []string{"gemini-2.5-flash-lite"}},
+		{ID: "gemini-2-5-cu", Label: "Gemini 2.5 CU", ModelIDs: []string{"rev19-uic3-1p"}},
+		{ID: "gemini-3-flash", Label: "Gemini 3 Flash", ModelIDs: []string{"gemini-3-flash"}},
+		{ID: "gemini-image", Label: "gemini-3.1-flash-image", ModelIDs: []string{"gemini-3.1-flash-image"}, LabelFromModel: true},
+	}
+)
+
+type namedModelGroup struct {
+	ID             string
+	Label          string
+	ModelIDs       []string
+	LabelFromModel bool
 }
 
 func loadProviderAuths(ctx context.Context, cfg config, provider string) ([]authEntry, error) {
@@ -134,8 +172,17 @@ func queryCodexQuota(ctx context.Context, client *http.Client, cfg config, entry
 }
 
 func queryGeminiQuota(ctx context.Context, client *http.Client, cfg config, entry authEntry) (quotaReport, error) {
+	return queryGoogleQuotaProvider(ctx, client, cfg, entry, googleQuotaProviderConfig{
+		ProviderID:         "gemini-cli",
+		ParseProjectID:     parseGeminiProjectID,
+		LoadMetadata:       geminiLoadMetadata,
+		IncludeDuetProject: true,
+	})
+}
+
+func queryAntigravityQuota(ctx context.Context, client *http.Client, cfg config, entry authEntry) (quotaReport, error) {
 	report := quotaReport{
-		Provider:   "gemini-cli",
+		Provider:   "antigravity",
 		Name:       cleanString(firstValue(entry.raw["name"], entry.raw["id"], "unknown")),
 		AuthIndex:  cleanString(firstValue(entry.raw["auth_index"], entry.raw["authIndex"])),
 		PlanType:   "unknown",
@@ -148,36 +195,85 @@ func queryGeminiQuota(ctx context.Context, client *http.Client, cfg config, entr
 	}
 	if report.AuthIndex == "" {
 		report.Error = "missing auth_index"
-		report.Status = deriveGeminiStatus(report)
+		report.Status = deriveGoogleQuotaStatus(report)
 		return report, nil
 	}
 
-	projectID := parseGeminiProjectID(entry.raw)
+	projectID := parseAntigravityProjectID(entry.raw)
+	if projectID == "" {
+		loadBody, loadErr := callGoogleLoadCodeAssist(ctx, client, cfg, report.AuthIndex, antigravityLoadMetadata, "")
+		if loadErr == nil {
+			populateGoogleAssistReport(&report, loadBody)
+			projectID = cleanString(firstValue(loadBody["cloudaicompanionProject"], nested(loadBody, "cloudaicompanionProject", "id")))
+		}
+	}
 	if projectID == "" {
 		report.Error = "missing project_id"
-		report.Status = deriveGeminiStatus(report)
+		report.Status = deriveGoogleQuotaStatus(report)
+		return report, nil
+	}
+	report.MetaFields["project"] = projectID
+
+	modelsBody, err := callAntigravityFetchModels(ctx, client, cfg, report.AuthIndex, projectID)
+	if err != nil {
+		report.Error = err.Error()
+		report.Status = deriveGoogleQuotaStatus(report)
+		return report, nil
+	}
+	report.Windows = parseAntigravityQuotaWindows(modelsBody)
+	supplementGoogleTier(ctx, client, cfg, &report, projectID, antigravityLoadMetadata, false)
+	report.Error = ""
+	report.Status = deriveGoogleQuotaStatus(report)
+	return report, nil
+}
+
+type googleQuotaProviderConfig struct {
+	ProviderID         string
+	ParseProjectID     func(map[string]any) string
+	LoadMetadata       map[string]string
+	IncludeDuetProject bool
+}
+
+func queryGoogleQuotaProvider(ctx context.Context, client *http.Client, cfg config, entry authEntry, providerCfg googleQuotaProviderConfig) (quotaReport, error) {
+	report := quotaReport{
+		Provider:   providerCfg.ProviderID,
+		Name:       cleanString(firstValue(entry.raw["name"], entry.raw["id"], "unknown")),
+		AuthIndex:  cleanString(firstValue(entry.raw["auth_index"], entry.raw["authIndex"])),
+		PlanType:   "unknown",
+		Status:     "unknown",
+		Cells:      map[string]quotaCell{},
+		MetaFields: map[string]string{},
+	}
+	if report.Name == "" {
+		report.Name = "unknown"
+	}
+	if report.AuthIndex == "" {
+		report.Error = "missing auth_index"
+		report.Status = deriveGoogleQuotaStatus(report)
 		return report, nil
 	}
 
-	bodyRaw, err := json.Marshal(map[string]any{"project": projectID})
-	if err != nil {
-		return report, err
+	projectID := ""
+	if providerCfg.ParseProjectID != nil {
+		projectID = providerCfg.ParseProjectID(entry.raw)
 	}
-
-	payload := map[string]any{
-		"auth_index": report.AuthIndex,
-		"method":     "POST",
-		"url":        geminiRetrieveQuotaURL,
-		"header": map[string]string{
-			"Authorization": "Bearer $TOKEN$",
-			"Content-Type":  "application/json",
-		},
-		"data": string(bodyRaw),
+	if projectID == "" {
+		loadBody, loadErr := callGoogleLoadCodeAssist(ctx, client, cfg, report.AuthIndex, providerCfg.LoadMetadata, "")
+		if loadErr == nil {
+			populateGoogleAssistReport(&report, loadBody)
+			projectID = cleanString(firstValue(loadBody["cloudaicompanionProject"], nested(loadBody, "cloudaicompanionProject", "id")))
+		}
 	}
+	if projectID == "" {
+		report.Error = "missing project_id"
+		report.Status = deriveGoogleQuotaStatus(report)
+		return report, nil
+	}
+	report.MetaFields["project"] = projectID
 
 	var lastErr string
 	for attempt := 1; attempt <= cfg.RetryAttempts; attempt++ {
-		response, err := postJSON(ctx, client, cfg, cfg.BaseURL+"/v0/management/api-call", payload)
+		parsedBody, err := callGoogleRetrieveQuota(ctx, client, cfg, report.AuthIndex, projectID, providerCfg.LoadMetadata)
 		if err != nil {
 			lastErr = err.Error()
 			if attempt == cfg.RetryAttempts || !shouldRetryError(lastErr) {
@@ -185,37 +281,15 @@ func queryGeminiQuota(ctx context.Context, client *http.Client, cfg config, entr
 			}
 			continue
 		}
-		statusCode := intFromAny(firstValue(response["status_code"], response["statusCode"]))
-		bodyValue := response["body"]
-		parsedBody, parseErr := parseBody(bodyValue)
-		if statusCode < 200 || statusCode >= 300 {
-			lastErr = bodyString(bodyValue)
-			if lastErr == "" {
-				lastErr = fmt.Sprintf("HTTP %d", statusCode)
-			}
-			if attempt == cfg.RetryAttempts || !shouldRetryError(lastErr) {
-				break
-			}
-			continue
-		}
-		if parseErr != nil {
-			lastErr = "empty or invalid retrieveUserQuota payload"
-			if attempt == cfg.RetryAttempts {
-				break
-			}
-			continue
-		}
-
-		report.MetaFields["project"] = projectID
 		report.Windows = parseGeminiQuotaWindows(parsedBody)
-		supplementGeminiTier(ctx, client, cfg, &report, projectID)
+		supplementGoogleTier(ctx, client, cfg, &report, projectID, providerCfg.LoadMetadata, providerCfg.IncludeDuetProject)
 		report.Error = ""
-		report.Status = deriveGeminiStatus(report)
+		report.Status = deriveGoogleQuotaStatus(report)
 		return report, nil
 	}
 
 	report.Error = lastErr
-	report.Status = deriveGeminiStatus(report)
+	report.Status = deriveGoogleQuotaStatus(report)
 	return report, nil
 }
 
@@ -405,43 +479,159 @@ func formatGeminiResetLabel(v string) string {
 	return t.Local().Format("01-02 15:04")
 }
 
-func supplementGeminiTier(ctx context.Context, client *http.Client, cfg config, report *quotaReport, projectID string) {
-	requestBody := map[string]any{
-		"cloudaicompanionProject": projectID,
-		"metadata": map[string]string{
-			"ideType":     "IDE_UNSPECIFIED",
-			"platform":    "PLATFORM_UNSPECIFIED",
-			"pluginType":  "GEMINI",
-			"duetProject": projectID,
-		},
-	}
-	bodyRaw, err := json.Marshal(requestBody)
+func callGoogleRetrieveQuota(ctx context.Context, client *http.Client, cfg config, authIndex, projectID string, metadata map[string]string) (map[string]any, error) {
+	bodyRaw, err := json.Marshal(map[string]any{"project": projectID})
 	if err != nil {
-		return
+		return nil, err
 	}
 	payload := map[string]any{
-		"auth_index": report.AuthIndex,
+		"auth_index": authIndex,
 		"method":     "POST",
-		"url":        geminiLoadCodeAssist,
-		"header": map[string]string{
-			"Authorization": "Bearer $TOKEN$",
-			"Content-Type":  "application/json",
-		},
-		"data": string(bodyRaw),
+		"url":        geminiRetrieveQuotaURL,
+		"header":     buildGoogleAPIHeaders(metadata),
+		"data":       string(bodyRaw),
 	}
 	response, err := postJSON(ctx, client, cfg, cfg.BaseURL+"/v0/management/api-call", payload)
 	if err != nil {
-		return
+		return nil, err
 	}
 	statusCode := intFromAny(firstValue(response["status_code"], response["statusCode"]))
+	bodyValue := response["body"]
 	if statusCode < 200 || statusCode >= 300 {
-		return
+		lastErr := bodyString(bodyValue)
+		if lastErr == "" {
+			lastErr = fmt.Sprintf("HTTP %d", statusCode)
+		}
+		return nil, fmt.Errorf("%s", lastErr)
 	}
-	parsedBody, err := parseBody(response["body"])
+	parsedBody, parseErr := parseBody(bodyValue)
+	if parseErr != nil {
+		return nil, fmt.Errorf("empty or invalid retrieveUserQuota payload")
+	}
+	return parsedBody, nil
+}
+
+func callGoogleLoadCodeAssist(ctx context.Context, client *http.Client, cfg config, authIndex string, metadata map[string]string, projectID string) (map[string]any, error) {
+	requestBody := map[string]any{
+		"metadata": cloneStringMap(metadata),
+	}
+	if strings.TrimSpace(projectID) != "" {
+		requestBody["cloudaicompanionProject"] = projectID
+	}
+	bodyRaw, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]any{
+		"auth_index": authIndex,
+		"method":     "POST",
+		"url":        geminiLoadCodeAssist,
+		"header":     buildGoogleAPIHeaders(metadata),
+		"data":       string(bodyRaw),
+	}
+	response, err := postJSON(ctx, client, cfg, cfg.BaseURL+"/v0/management/api-call", payload)
+	if err != nil {
+		return nil, err
+	}
+	statusCode := intFromAny(firstValue(response["status_code"], response["statusCode"]))
+	bodyValue := response["body"]
+	if statusCode < 200 || statusCode >= 300 {
+		lastErr := bodyString(bodyValue)
+		if lastErr == "" {
+			lastErr = fmt.Sprintf("HTTP %d", statusCode)
+		}
+		return nil, fmt.Errorf("%s", lastErr)
+	}
+	parsedBody, parseErr := parseBody(bodyValue)
+	if parseErr != nil {
+		return nil, fmt.Errorf("empty or invalid loadCodeAssist payload")
+	}
+	return parsedBody, nil
+}
+
+func callAntigravityFetchModels(ctx context.Context, client *http.Client, cfg config, authIndex, projectID string) (map[string]any, error) {
+	bodyRaw, err := json.Marshal(map[string]any{"project": projectID})
+	if err != nil {
+		return nil, err
+	}
+	basePayload := map[string]any{
+		"auth_index": authIndex,
+		"method":     "POST",
+		"header": map[string]string{
+			"Authorization": "Bearer $TOKEN$",
+			"Content-Type":  "application/json",
+			"User-Agent":    "antigravity/1.11.5 windows/amd64",
+		},
+		"data": string(bodyRaw),
+	}
+	var lastErr string
+	for _, endpoint := range []string{antigravityModelsURL, antigravityDailyURL, antigravitySandboxURL} {
+		payload := map[string]any{}
+		for k, v := range basePayload {
+			payload[k] = v
+		}
+		payload["url"] = endpoint
+		response, err := postJSON(ctx, client, cfg, cfg.BaseURL+"/v0/management/api-call", payload)
+		if err != nil {
+			lastErr = err.Error()
+			continue
+		}
+		statusCode := intFromAny(firstValue(response["status_code"], response["statusCode"]))
+		bodyValue := response["body"]
+		if statusCode < 200 || statusCode >= 300 {
+			lastErr = bodyString(bodyValue)
+			if lastErr == "" {
+				lastErr = fmt.Sprintf("HTTP %d", statusCode)
+			}
+			continue
+		}
+		parsedBody, parseErr := parseBody(bodyValue)
+		if parseErr != nil {
+			lastErr = "empty or invalid fetchAvailableModels payload"
+			continue
+		}
+		return parsedBody, nil
+	}
+	if lastErr == "" {
+		lastErr = "fetchAvailableModels failed"
+	}
+	return nil, fmt.Errorf("%s", lastErr)
+}
+
+func supplementGoogleTier(ctx context.Context, client *http.Client, cfg config, report *quotaReport, projectID string, metadata map[string]string, includeDuetProject bool) {
+	loadMetadata := cloneStringMap(metadata)
+	if includeDuetProject {
+		loadMetadata["duetProject"] = projectID
+	}
+	parsedBody, err := callGoogleLoadCodeAssist(ctx, client, cfg, report.AuthIndex, loadMetadata, projectID)
 	if err != nil {
 		return
 	}
-	populateGeminiReport(report, parsedBody)
+	populateGoogleAssistReport(report, parsedBody)
+}
+
+func buildGoogleAPIHeaders(metadata map[string]string) map[string]string {
+	headers := map[string]string{
+		"Authorization": "Bearer $TOKEN$",
+		"Content-Type":  "application/json",
+	}
+	if len(metadata) == 0 {
+		return headers
+	}
+	headers["User-Agent"] = "google-api-nodejs-client/9.15.1"
+	headers["X-Goog-Api-Client"] = "google-cloud-sdk vscode_cloudshelleditor/0.1"
+	if body, err := json.Marshal(metadata); err == nil {
+		headers["Client-Metadata"] = string(body)
+	}
+	return headers
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func mergeMaps(base, extra map[string]string) map[string]string {
@@ -509,7 +699,124 @@ func parseGeminiProjectID(entry map[string]any) string {
 	return ""
 }
 
-func populateGeminiReport(report *quotaReport, payload map[string]any) {
+func parseAntigravityProjectID(entry map[string]any) string {
+	for _, candidate := range []string{
+		cleanString(entry["project_id"]),
+		cleanString(nested(entry, "metadata", "project_id")),
+	} {
+		if strings.TrimSpace(candidate) != "" {
+			return strings.TrimSpace(candidate)
+		}
+	}
+	return ""
+}
+
+func parseAntigravityQuotaWindows(payload map[string]any) []quotaWindow {
+	modelsRaw, ok := payload["models"].(map[string]any)
+	if !ok || len(modelsRaw) == 0 {
+		return nil
+	}
+	type modelQuota struct {
+		ModelID          string
+		DisplayName      string
+		RemainingPercent *float64
+		ResetLabel       string
+	}
+	models := map[string]modelQuota{}
+	for modelID, raw := range modelsRaw {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		quotaInfo, _ := firstValue(entry["quotaInfo"], entry["quota_info"]).(map[string]any)
+		remaining := numberPtr(firstValue(
+			nested(entry, "quotaInfo", "remainingFraction"),
+			nested(entry, "quota_info", "remaining_fraction"),
+			firstValue(quotaInfo["remainingFraction"], quotaInfo["remaining_fraction"], quotaInfo["remaining"]),
+		))
+		if remaining != nil {
+			v := clampFloat(*remaining*100, 0, 100)
+			remaining = &v
+		}
+		resetLabel := formatGeminiResetLabel(cleanString(firstValue(
+			nested(entry, "quotaInfo", "resetTime"),
+			nested(entry, "quota_info", "reset_time"),
+			firstValue(quotaInfo["resetTime"], quotaInfo["reset_time"]),
+		)))
+		if remaining == nil && resetLabel != "-" {
+			v := 0.0
+			remaining = &v
+		}
+		models[modelID] = modelQuota{
+			ModelID:          modelID,
+			DisplayName:      cleanString(entry["displayName"]),
+			RemainingPercent: remaining,
+			ResetLabel:       resetLabel,
+		}
+	}
+
+	var windows []quotaWindow
+	addGroup := func(group namedModelGroup, resetOverride string) *quotaWindow {
+		var matches []modelQuota
+		for _, modelID := range group.ModelIDs {
+			if model, ok := models[modelID]; ok && model.RemainingPercent != nil {
+				matches = append(matches, model)
+			}
+		}
+		if len(matches) == 0 {
+			return nil
+		}
+		minRemaining := *matches[0].RemainingPercent
+		resetLabel := matches[0].ResetLabel
+		displayName := matches[0].DisplayName
+		for _, item := range matches[1:] {
+			if item.RemainingPercent != nil && *item.RemainingPercent < minRemaining {
+				minRemaining = *item.RemainingPercent
+			}
+			if (resetLabel == "" || resetLabel == "-") && item.ResetLabel != "" {
+				resetLabel = item.ResetLabel
+			}
+			if displayName == "" {
+				displayName = item.DisplayName
+			}
+		}
+		if resetOverride != "" && resetOverride != "-" {
+			resetLabel = resetOverride
+		}
+		label := group.Label
+		if group.LabelFromModel && displayName != "" {
+			label = displayName
+		}
+		window := quotaWindow{
+			ID:               group.ID,
+			Label:            label,
+			RemainingPercent: &minRemaining,
+			ResetLabel:       defaultString(resetLabel, "-"),
+		}
+		windows = append(windows, window)
+		return &window
+	}
+
+	addGroup(antigravityModelGroups[0], "")
+	pro31 := addGroup(antigravityModelGroups[1], "")
+	pro3 := addGroup(antigravityModelGroups[2], "")
+	resetOverride := ""
+	if pro31 != nil && pro31.ResetLabel != "" && pro31.ResetLabel != "-" {
+		resetOverride = pro31.ResetLabel
+	} else if pro3 != nil && pro3.ResetLabel != "" && pro3.ResetLabel != "-" {
+		resetOverride = pro3.ResetLabel
+	}
+	for _, group := range antigravityModelGroups[3:] {
+		override := ""
+		if group.ID == "gemini-image" {
+			override = resetOverride
+		}
+		addGroup(group, override)
+	}
+	return windows
+}
+
+func populateGoogleAssistReport(report *quotaReport, payload map[string]any) {
 	currentTierID := cleanString(nested(payload, "currentTier", "id"))
 	currentTierName := cleanString(nested(payload, "currentTier", "name"))
 	channelName := cleanString(nested(payload, "releaseChannel", "name"))
@@ -553,7 +860,7 @@ func deriveCodexStatus(report quotaReport) string {
 	return "full"
 }
 
-func deriveGeminiStatus(report quotaReport) string {
+func deriveGoogleQuotaStatus(report quotaReport) string {
 	if report.Error != "" {
 		return "error"
 	}
@@ -589,6 +896,10 @@ func deriveGeminiStatus(report quotaReport) string {
 	}
 }
 
+func deriveGeminiStatus(report quotaReport) string {
+	return deriveGoogleQuotaStatus(report)
+}
+
 func sortReportsByProvider(reports []quotaReport) {
 	sort.SliceStable(reports, func(i, j int) bool {
 		left, right := reports[i], reports[j]
@@ -598,7 +909,7 @@ func sortReportsByProvider(reports []quotaReport) {
 		switch left.Provider {
 		case "codex":
 			return codexLess(left, right)
-		case "gemini-cli":
+		case "gemini-cli", "antigravity":
 			return geminiLess(left, right)
 		default:
 			return strings.ToLower(left.Name) < strings.ToLower(right.Name)
@@ -684,6 +995,8 @@ func providerOrderRank(provider string) int {
 		return 0
 	case "gemini-cli":
 		return 1
+	case "antigravity":
+		return 2
 	default:
 		return 99
 	}

@@ -397,6 +397,7 @@ func summarize(reports []quotaReport) summary {
 		StatusCounts:      map[string]int{},
 		PlanCounts:        map[string]int{},
 		GeminiEquivalents: map[string]float64{},
+		AntigravityEquivs: map[string]float64{},
 	}
 	for _, report := range reports {
 		sum.ProviderCounts[report.Provider]++
@@ -421,12 +422,20 @@ func summarize(reports []quotaReport) summary {
 		sum.AdditionalWindows += len(report.AdditionalWindows)
 
 		if report.Provider != "codex" {
-			if report.Provider == "gemini-cli" {
+			switch report.Provider {
+			case "gemini-cli":
 				for _, window := range report.Windows {
 					if window.RemainingPercent == nil {
 						continue
 					}
 					sum.GeminiEquivalents[window.Label] += *window.RemainingPercent
+				}
+			case "antigravity":
+				for _, window := range report.Windows {
+					if window.RemainingPercent == nil {
+						continue
+					}
+					sum.AntigravityEquivs[window.Label] += *window.RemainingPercent
 				}
 			}
 			continue

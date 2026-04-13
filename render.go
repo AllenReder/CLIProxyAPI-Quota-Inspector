@@ -38,7 +38,7 @@ func renderPlain(reports []quotaReport, sum summary, summaryOnly bool) {
 				for _, window := range report.Windows {
 					fmt.Printf("  %s: %s reset=%s\n", window.Label, asciiProgress(window.RemainingPercent, 18), window.ResetLabel)
 				}
-			case "gemini-cli":
+			case "gemini-cli", "antigravity":
 				for _, window := range report.Windows {
 					fmt.Printf("  %s: %s reset=%s\n", window.Label, asciiProgress(window.RemainingPercent, 18), window.ResetLabel)
 				}
@@ -75,7 +75,7 @@ func renderPrettyReport(reports []quotaReport, sum summary, cfg config) {
 		switch section.Provider {
 		case "codex":
 			renderCodexSection(section.Reports, cfg, tableHeader, rowBase, rowAlt, themeDim)
-		case "gemini-cli":
+		case "gemini-cli", "antigravity":
 			renderGeminiSection(section.Reports, cfg, tableHeader, rowBase, rowAlt, themeDim)
 		default:
 			renderGenericSection(section.Reports, tableHeader, rowBase, rowAlt, themeDim)
@@ -251,6 +251,21 @@ func providerSummaryStats(provider string, title string, reports []quotaReport, 
 			stats.Extras = append(stats.Extras, providerSummaryRow{
 				Label: key + " Equivalent",
 				Value: fmt.Sprintf("%.0f%%", sum.GeminiEquivalents[key]),
+			})
+		}
+	case "antigravity":
+		if len(sum.AntigravityEquivs) == 0 {
+			break
+		}
+		keys := make([]string, 0, len(sum.AntigravityEquivs))
+		for key := range sum.AntigravityEquivs {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			stats.Extras = append(stats.Extras, providerSummaryRow{
+				Label: key + " Equivalent",
+				Value: fmt.Sprintf("%.0f%%", sum.AntigravityEquivs[key]),
 			})
 		}
 	}
