@@ -84,7 +84,7 @@ go build -o cpa-quota-inspector .
 
 - `--cpa-base-url`: CPA base URL, default `http://127.0.0.1:8317`
 - `--management-key`, `-k`: management bearer key
-- `--concurrency`: concurrent quota workers
+- `--concurrency`: concurrent quota workers, default `32`
 - `--timeout`: HTTP timeout seconds
 - `--retry-attempts`: transient retry count
 - `--version`: print version/build metadata

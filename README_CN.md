@@ -82,7 +82,7 @@ go build -o cpa-quota-inspector .
 
 - `--cpa-base-url`: CPA 地址，默认 `http://127.0.0.1:8317`
 - `--management-key`, `-k`: 管理密钥
-- `--concurrency`: 并发查询数
+- `--concurrency`: 并发查询数，默认 `32`
 - `--timeout`: 请求超时秒数
 - `--retry-attempts`: 临时失败重试次数
 - `--version`: 输出版本/构建信息

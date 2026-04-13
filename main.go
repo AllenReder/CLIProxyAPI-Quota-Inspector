@@ -67,7 +67,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.FilterProvider, "filter-provider", "", "Only show reports for a specific provider")
 	flag.StringVar(&cfg.FilterPlan, "filter-plan", "", "Only show accounts with this plan_type")
 	flag.StringVar(&cfg.FilterStatus, "filter-status", "", "Only show accounts with this derived status")
-	flag.IntVar(&cfg.Concurrency, "concurrency", 8, "Concurrent quota refresh workers")
+	flag.IntVar(&cfg.Concurrency, "concurrency", 32, "Concurrent quota refresh workers")
 	timeoutSeconds := flag.Int("timeout", defaultTimeoutSeconds, "HTTP timeout in seconds")
 	flag.IntVar(&cfg.RetryAttempts, "retry-attempts", defaultRetryAttempts, "Retry attempts for transient per-account quota queries")
 	flag.Parse()
