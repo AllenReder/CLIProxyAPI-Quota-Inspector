@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"time"
 )
@@ -26,14 +25,18 @@ func main() {
 	}
 
 	filtered := filterReports(reports, cfg.FilterPlan, cfg.FilterStatus)
+	filtered = filterReportsByProvider(filtered, cfg.FilterProvider)
 	sortReportsDefault(filtered)
 	sum := summarize(filtered)
+	sections := buildSections(filtered)
 
 	if cfg.JSON {
 		payload := map[string]any{
-			"base_url": cfg.BaseURL,
-			"summary":  sum,
-			"reports":  filtered,
+			"base_url":           cfg.BaseURL,
+			"summary":            sum,
+			"provider_summaries": buildProviderSummaries(filtered, sum),
+			"sections":           sections,
+			"reports":            filtered,
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -61,6 +64,7 @@ func parseFlags() config {
 	flag.BoolVar(&cfg.SummaryOnly, "summary-only", false, "Print summary only")
 	flag.BoolVar(&cfg.ASCIIBars, "ascii-bars", false, "Use ASCII progress bars instead of Unicode bars")
 	flag.BoolVar(&cfg.NoProgress, "no-progress", false, "Disable quota query progress output")
+	flag.StringVar(&cfg.FilterProvider, "filter-provider", "", "Only show reports for a specific provider")
 	flag.StringVar(&cfg.FilterPlan, "filter-plan", "", "Only show accounts with this plan_type")
 	flag.StringVar(&cfg.FilterStatus, "filter-status", "", "Only show accounts with this derived status")
 	flag.IntVar(&cfg.Concurrency, "concurrency", 8, "Concurrent quota refresh workers")
@@ -109,12 +113,22 @@ func resolveManagementKey(explicit string) string {
 }
 
 func fetchAll(ctx context.Context, cfg config) ([]quotaReport, summary, error) {
-	auths, err := loadCodexAuths(ctx, cfg)
-	if err != nil {
-		return nil, summary{}, err
+	providers := providerDefinitions()
+	var tasks []authTask
+	for _, provider := range providers {
+		auths, err := provider.LoadAuths(ctx, cfg)
+		if err != nil {
+			return nil, summary{}, err
+		}
+		for _, entry := range auths {
+			tasks = append(tasks, authTask{
+				Provider: provider,
+				Entry:    entry,
+			})
+		}
 	}
 	showProgress := !cfg.JSON && !cfg.NoProgress && isStdoutTerminal()
-	reports, err := queryAllQuotas(ctx, cfg, auths, showProgress)
+	reports, err := queryAllQuotas(ctx, cfg, tasks, showProgress)
 	if err != nil {
 		return nil, summary{}, err
 	}
@@ -122,36 +136,5 @@ func fetchAll(ctx context.Context, cfg config) ([]quotaReport, summary, error) {
 }
 
 func sortReportsDefault(reports []quotaReport) {
-	planRank := func(plan string) int {
-		switch strings.ToLower(strings.TrimSpace(plan)) {
-		case "free":
-			return 0
-		case "team":
-			return 1
-		case "plus":
-			return 2
-		default:
-			return 3
-		}
-	}
-	remaining7d := func(report quotaReport) float64 {
-		window := findWindow(report.Windows, "code-7d")
-		if window == nil || window.RemainingPercent == nil {
-			return 101
-		}
-		return *window.RemainingPercent
-	}
-	sort.SliceStable(reports, func(i, j int) bool {
-		li := planRank(reports[i].PlanType)
-		lj := planRank(reports[j].PlanType)
-		if li != lj {
-			return li < lj
-		}
-		ri := remaining7d(reports[i])
-		rj := remaining7d(reports[j])
-		if ri != rj {
-			return ri < rj
-		}
-		return strings.ToLower(reports[i].Name) < strings.ToLower(reports[j].Name)
-	})
+	sortReportsByProvider(reports)
 }

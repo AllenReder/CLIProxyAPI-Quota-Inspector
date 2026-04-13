@@ -309,6 +309,52 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func extractParenValue(value string) string {
+	raw := strings.TrimSpace(value)
+	start := strings.LastIndex(raw, "(")
+	end := strings.LastIndex(raw, ")")
+	if start < 0 || end <= start {
+		return ""
+	}
+	return strings.TrimSpace(raw[start+1 : end])
+}
+
+func extractFileProject(name string) string {
+	raw := strings.TrimSpace(name)
+	raw = strings.TrimSuffix(raw, ".json")
+	parts := strings.Split(raw, "-")
+	if len(parts) < 2 {
+		return ""
+	}
+	last := strings.TrimSpace(parts[len(parts)-1])
+	if last == "" || strings.Contains(last, "@") {
+		return ""
+	}
+	return last
+}
+
+func titleProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codex":
+		return "Codex"
+	case "gemini-cli":
+		return "Gemini CLI"
+	default:
+		parts := strings.FieldsFunc(provider, func(r rune) bool {
+			return r == '-' || r == '_' || r == ' '
+		})
+		for i := range parts {
+			if parts[i] == "" {
+				continue
+			}
+			runes := []rune(strings.ToLower(parts[i]))
+			runes[0] = []rune(strings.ToUpper(string(runes[0])))[0]
+			parts[i] = string(runes)
+		}
+		return strings.Join(parts, " ")
+	}
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a

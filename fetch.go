@@ -18,56 +18,36 @@ import (
 	"golang.org/x/term"
 )
 
-func loadCodexAuths(ctx context.Context, cfg config) ([]authEntry, error) {
-	client := &http.Client{Timeout: cfg.Timeout}
-	payload, err := fetchJSON(ctx, client, cfg, cfg.BaseURL+"/v0/management/auth-files")
-	if err != nil {
-		return nil, err
-	}
-	files, ok := payload["files"].([]any)
-	if !ok {
-		return nil, fmt.Errorf("unexpected auth-files payload from CPA management API")
-	}
-	out := make([]authEntry, 0, len(files))
-	for _, item := range files {
-		entry, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		provider := normalizePlan(firstValue(entry["provider"], entry["type"]))
-		if provider != "codex" {
-			continue
-		}
-		out = append(out, authEntry{raw: entry})
-	}
-	return out, nil
+type authTask struct {
+	Provider *providerDef
+	Entry    authEntry
 }
 
-func queryAllQuotas(ctx context.Context, cfg config, auths []authEntry, showProgress bool) ([]quotaReport, error) {
-	if len(auths) == 0 {
+func queryAllQuotas(ctx context.Context, cfg config, tasks []authTask, showProgress bool) ([]quotaReport, error) {
+	if len(tasks) == 0 {
 		return []quotaReport{}, nil
 	}
 	client := &http.Client{Timeout: cfg.Timeout}
-	reports := make([]quotaReport, len(auths))
-	errCh := make(chan error, len(auths))
-	progressCh := make(chan string, len(auths))
+	reports := make([]quotaReport, len(tasks))
+	errCh := make(chan error, len(tasks))
+	progressCh := make(chan string, len(tasks))
 	sem := make(chan struct{}, cfg.Concurrency)
 	var wg sync.WaitGroup
 
-	for i := range auths {
+	for i := range tasks {
 		i := i
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			report, err := querySingleQuota(ctx, client, cfg, auths[i])
+			report, err := tasks[i].Provider.QueryReport(ctx, client, cfg, tasks[i].Entry)
 			if err != nil {
 				errCh <- err
 				return
 			}
 			reports[i] = report
-			progressCh <- report.Name
+			progressCh <- fmt.Sprintf("%s / %s", tasks[i].Provider.SectionTitle, report.Name)
 		}()
 	}
 
@@ -82,10 +62,10 @@ func queryAllQuotas(ctx context.Context, cfg config, auths []authEntry, showProg
 				renderFetchProgress(completed, total, current)
 			}
 			if completed > 0 {
-				fmt.Print("\r" + strings.Repeat(" ", 140) + "\r")
+				fmt.Print("\r" + strings.Repeat(" ", 160) + "\r")
 			}
 			close(done)
-		}(len(auths))
+		}(len(tasks))
 	}
 
 	wg.Wait()
@@ -100,10 +80,6 @@ func queryAllQuotas(ctx context.Context, cfg config, auths []authEntry, showProg
 			return nil, err
 		}
 	}
-
-	sort.Slice(reports, func(i, j int) bool {
-		return strings.ToLower(reports[i].Name) < strings.ToLower(reports[j].Name)
-	})
 	return reports, nil
 }
 
@@ -116,7 +92,7 @@ func renderFetchProgress(done, total int, current string) {
 		termWidth = w
 	}
 	left := fmt.Sprintf("Querying %d/%d", done, total)
-	name := truncate(current, 40)
+	name := truncate(current, 48)
 	barArea := termWidth - displayWidth(left) - displayWidth(name) - 10
 	if barArea < 10 {
 		barArea = 10
@@ -128,93 +104,6 @@ func renderFetchProgress(done, total int, current string) {
 	}
 	bar := "[" + strings.Repeat("█", filled) + strings.Repeat("░", max(0, barArea-filled)) + "]"
 	fmt.Printf("\r%s %s %3.0f%% %s", left, bar, pct, name)
-}
-
-func querySingleQuota(ctx context.Context, client *http.Client, cfg config, entry authEntry) (quotaReport, error) {
-	report := quotaReport{
-		Name:      cleanString(firstValue(entry.raw["name"], entry.raw["id"], "unknown")),
-		AuthIndex: cleanString(firstValue(entry.raw["auth_index"], entry.raw["authIndex"])),
-		AccountID: parseAccountID(entry.raw),
-		PlanType:  parsePlanType(entry.raw),
-		Status:    "unknown",
-	}
-	if report.Name == "" {
-		report.Name = "unknown"
-	}
-	if report.AuthIndex == "" {
-		report.Error = "missing auth_index"
-		report.Status = deriveStatus(report)
-		return report, nil
-	}
-	if report.AccountID == "" {
-		report.Error = "missing chatgpt_account_id"
-		report.Status = deriveStatus(report)
-		return report, nil
-	}
-
-	payload := map[string]any{
-		"auth_index": report.AuthIndex,
-		"method":     "GET",
-		"url":        whamUsageURL,
-		"header": mergeMaps(
-			whamHeaders,
-			map[string]string{"Chatgpt-Account-Id": report.AccountID},
-		),
-	}
-
-	var lastErr string
-	for attempt := 1; attempt <= cfg.RetryAttempts; attempt++ {
-		response, err := postJSON(ctx, client, cfg, cfg.BaseURL+"/v0/management/api-call", payload)
-		if err != nil {
-			lastErr = err.Error()
-			if attempt == cfg.RetryAttempts || !shouldRetryError(lastErr) {
-				break
-			}
-			continue
-		}
-		statusCode := intFromAny(firstValue(response["status_code"], response["statusCode"]))
-		bodyValue := response["body"]
-		parsedBody, parseErr := parseBody(bodyValue)
-		if statusCode < 200 || statusCode >= 300 {
-			lastErr = bodyString(bodyValue)
-			if lastErr == "" {
-				lastErr = fmt.Sprintf("HTTP %d", statusCode)
-			}
-			if attempt == cfg.RetryAttempts || !shouldRetryError(lastErr) {
-				break
-			}
-			continue
-		}
-		if parseErr != nil {
-			lastErr = "empty or invalid quota payload"
-			if attempt == cfg.RetryAttempts {
-				break
-			}
-			continue
-		}
-
-		report.PlanType = firstNonEmpty(normalizePlan(firstValue(parsedBody["plan_type"], parsedBody["planType"])), report.PlanType)
-		report.Windows = parseCodexWindows(parsedBody)
-		report.AdditionalWindows = parseAdditionalWindows(parsedBody)
-		report.Error = ""
-		report.Status = deriveStatus(report)
-		return report, nil
-	}
-
-	report.Error = lastErr
-	report.Status = deriveStatus(report)
-	return report, nil
-}
-
-func mergeMaps(base, extra map[string]string) map[string]string {
-	out := map[string]string{}
-	for k, v := range base {
-		out[k] = v
-	}
-	for k, v := range extra {
-		out[k] = v
-	}
-	return out
 }
 
 func fetchJSON(ctx context.Context, client *http.Client, cfg config, url string) (map[string]any, error) {
@@ -287,46 +176,6 @@ func parseBody(body any) (map[string]any, error) {
 	}
 }
 
-func parseAccountID(entry map[string]any) string {
-	candidates := []any{
-		entry["id_token"],
-		nested(entry, "metadata", "id_token"),
-		nested(entry, "attributes", "id_token"),
-	}
-	for _, candidate := range candidates {
-		payload := parseJWTLike(candidate)
-		if payload == nil {
-			continue
-		}
-		if accountID := cleanString(payload["chatgpt_account_id"]); accountID != "" {
-			return accountID
-		}
-		if authInfo, ok := payload["https://api.openai.com/auth"].(map[string]any); ok {
-			if accountID := cleanString(authInfo["chatgpt_account_id"]); accountID != "" {
-				return accountID
-			}
-		}
-	}
-	return ""
-}
-
-func parsePlanType(entry map[string]any) string {
-	candidates := []any{
-		entry["plan_type"],
-		entry["planType"],
-		nested(entry, "metadata", "plan_type"),
-		nested(entry, "metadata", "planType"),
-		nested(entry, "attributes", "plan_type"),
-		nested(entry, "attributes", "planType"),
-	}
-	for _, candidate := range candidates {
-		if plan := normalizePlan(candidate); plan != "" {
-			return plan
-		}
-	}
-	return ""
-}
-
 func parseJWTLike(value any) map[string]any {
 	switch v := value.(type) {
 	case map[string]any:
@@ -373,10 +222,10 @@ func parseCodexWindows(payload map[string]any) []quotaWindow {
 	mainLimitReached := anyFromMap(rateLimit, "limit_reached", "limitReached")
 	mainAllowed := anyFromMap(rateLimit, "allowed")
 	var windows []quotaWindow
-	if window := buildWindow("code-5h", "Code 5h", fiveHour, mainLimitReached, mainAllowed); window != nil {
+	if window := buildWindow("code-5h", "5h", fiveHour, mainLimitReached, mainAllowed); window != nil {
 		windows = append(windows, *window)
 	}
-	if window := buildWindow("code-7d", "Code 7d", weekly, mainLimitReached, mainAllowed); window != nil {
+	if window := buildWindow("code-7d", "7d", weekly, mainLimitReached, mainAllowed); window != nil {
 		windows = append(windows, *window)
 	}
 	return windows
@@ -486,33 +335,6 @@ func formatResetLabel(window map[string]any) string {
 	return "-"
 }
 
-func deriveStatus(report quotaReport) string {
-	if report.Error != "" {
-		return "error"
-	}
-	if report.AuthIndex == "" || report.AccountID == "" {
-		return "missing"
-	}
-	window7d := findWindow(report.Windows, "code-7d")
-	if window7d == nil || window7d.RemainingPercent == nil {
-		return "unknown"
-	}
-	remaining := *window7d.RemainingPercent
-	if remaining <= 0 {
-		return "exhausted"
-	}
-	if remaining <= 30 {
-		return "low"
-	}
-	if remaining <= 70 {
-		return "medium"
-	}
-	if remaining < 100 {
-		return "high"
-	}
-	return "full"
-}
-
 func shouldRetryError(message string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(message))
 	if normalized == "" {
@@ -554,13 +376,30 @@ func filterReports(reports []quotaReport, plan, status string) []quotaReport {
 	return out
 }
 
+func filterReportsByProvider(reports []quotaReport, provider string) []quotaReport {
+	want := strings.ToLower(strings.TrimSpace(provider))
+	if want == "" {
+		return reports
+	}
+	var out []quotaReport
+	for _, report := range reports {
+		if strings.EqualFold(report.Provider, want) {
+			out = append(out, report)
+		}
+	}
+	return out
+}
+
 func summarize(reports []quotaReport) summary {
 	sum := summary{
-		Accounts:     len(reports),
-		StatusCounts: map[string]int{},
-		PlanCounts:   map[string]int{},
+		Accounts:          len(reports),
+		ProviderCounts:    map[string]int{},
+		StatusCounts:      map[string]int{},
+		PlanCounts:        map[string]int{},
+		GeminiEquivalents: map[string]float64{},
 	}
 	for _, report := range reports {
+		sum.ProviderCounts[report.Provider]++
 		sum.StatusCounts[report.Status]++
 		plan := report.PlanType
 		if plan == "" {
@@ -581,15 +420,63 @@ func summarize(reports []quotaReport) summary {
 		}
 		sum.AdditionalWindows += len(report.AdditionalWindows)
 
-		window7d := findWindow(report.Windows, "code-7d")
-		if window7d != nil && window7d.RemainingPercent != nil {
-			switch strings.ToLower(strings.TrimSpace(report.PlanType)) {
-			case "free":
-				sum.FreeEquivalent7D += *window7d.RemainingPercent
-			case "plus":
-				sum.PlusEquivalent7D += *window7d.RemainingPercent
+		if report.Provider != "codex" {
+			if report.Provider == "gemini-cli" {
+				for _, window := range report.Windows {
+					if window.RemainingPercent == nil {
+						continue
+					}
+					sum.GeminiEquivalents[window.Label] += *window.RemainingPercent
+				}
 			}
+			continue
+		}
+		window7d := findWindow(report.Windows, "code-7d")
+		if window7d == nil || window7d.RemainingPercent == nil {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(report.PlanType)) {
+		case "free":
+			sum.FreeEquivalent7D += *window7d.RemainingPercent
+		case "plus":
+			sum.PlusEquivalent7D += *window7d.RemainingPercent
 		}
 	}
 	return sum
+}
+
+func buildSections(reports []quotaReport) []reportSection {
+	grouped := map[string][]quotaReport{}
+	for _, report := range reports {
+		grouped[report.Provider] = append(grouped[report.Provider], report)
+	}
+	var sections []reportSection
+	for _, provider := range providerDefinitions() {
+		items := grouped[provider.ID]
+		if len(items) == 0 {
+			continue
+		}
+		sections = append(sections, reportSection{
+			Provider: provider.ID,
+			Title:    provider.SectionTitle,
+			Reports:  items,
+		})
+		delete(grouped, provider.ID)
+	}
+	if len(grouped) == 0 {
+		return sections
+	}
+	leftovers := make([]string, 0, len(grouped))
+	for provider := range grouped {
+		leftovers = append(leftovers, provider)
+	}
+	sort.Strings(leftovers)
+	for _, provider := range leftovers {
+		sections = append(sections, reportSection{
+			Provider: provider,
+			Title:    titleProvider(provider),
+			Reports:  grouped[provider],
+		})
+	}
+	return sections
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -11,47 +12,53 @@ import (
 )
 
 func renderPlain(reports []quotaReport, sum summary, summaryOnly bool) {
-	fmt.Printf("Accounts: %d\n", sum.Accounts)
-	fmt.Printf("Status counts: %v\n", sum.StatusCounts)
-	fmt.Printf("Plan counts: %v\n", sum.PlanCounts)
-	fmt.Printf("Exhausted: %d\n", sum.ExhaustedAccounts)
-	fmt.Printf("Low: %d\n", sum.LowAccounts)
-	fmt.Printf("Errors: %d\n", sum.ErrorAccounts)
-	fmt.Printf("Free Equivalent 7d: %.0f%%\n", sum.FreeEquivalent7D)
-	fmt.Printf("Plus Equivalent 7d: %.0f%%\n", sum.PlusEquivalent7D)
+	for _, section := range buildSections(reports) {
+		stats := providerSummaryStats(section.Provider, section.Title, section.Reports, sum)
+		fmt.Printf("[%s Summary]\n", section.Title)
+		fmt.Printf("Accounts: %d\n", stats.Accounts)
+		fmt.Printf("Plans: %s\n", formatCountMap(stats.Plans))
+		fmt.Printf("Statuses: %s\n", formatCountMap(stats.Statuses))
+		for _, row := range stats.Extras {
+			fmt.Printf("%s: %s\n", row.Label, row.Value)
+		}
+		fmt.Println()
+	}
 	if summaryOnly {
 		return
 	}
-	for _, report := range reports {
-		fmt.Printf("\n%s [%s] %s\n", report.Name, defaultString(report.PlanType, "unknown"), report.Status)
-		if report.Error != "" {
-			fmt.Printf("  error: %s\n", report.Error)
-		}
-		for _, window := range report.Windows {
-			fmt.Printf("  %s: %s reset=%s\n", window.Label, asciiProgress(window.RemainingPercent, 18), window.ResetLabel)
-		}
-		for _, window := range report.AdditionalWindows {
-			fmt.Printf("  %s: %s reset=%s\n", window.Label, asciiProgress(window.RemainingPercent, 18), window.ResetLabel)
+	for _, section := range buildSections(reports) {
+		fmt.Printf("\n[%s]\n", section.Title)
+		for _, report := range section.Reports {
+			fmt.Printf("%s [%s] %s\n", report.Name, defaultString(report.PlanType, "unknown"), report.Status)
+			if report.Error != "" {
+				fmt.Printf("  error: %s\n", report.Error)
+			}
+			switch report.Provider {
+			case "codex":
+				for _, window := range report.Windows {
+					fmt.Printf("  %s: %s reset=%s\n", window.Label, asciiProgress(window.RemainingPercent, 18), window.ResetLabel)
+				}
+			case "gemini-cli":
+				for _, window := range report.Windows {
+					fmt.Printf("  %s: %s reset=%s\n", window.Label, asciiProgress(window.RemainingPercent, 18), window.ResetLabel)
+				}
+				if note := geminiSummary(report); note != "-" {
+					fmt.Printf("  info: %s\n", note)
+				}
+			}
 		}
 	}
 }
 
 func renderPrettyReport(reports []quotaReport, sum summary, cfg config) {
-	themeTitle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FDE68A"))
-	themeSub := lipgloss.NewStyle().Foreground(lipgloss.Color("#FDBA74"))
+	themeTitle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F59E0B"))
+	themeSub := lipgloss.NewStyle().Foreground(lipgloss.Color("#FCD34D"))
 	themeDim := lipgloss.NewStyle().Foreground(lipgloss.Color("#A8A29E"))
-	fullStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#84CC16"))
-	highStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#22C55E"))
-	mediumStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#10B981"))
-	lowStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F59E0B"))
-	errStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#EF4444"))
-	planPlus := lipgloss.NewStyle().Foreground(lipgloss.Color("#60A5FA"))
-	planTeam := lipgloss.NewStyle().Foreground(lipgloss.Color("#FACC15"))
 	tableHeader := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FED7AA"))
 	rowAlt := lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F5F4"))
-	rowBase := lipgloss.NewStyle().Foreground(lipgloss.Color("#E7E5E4"))
+	rowBase := lipgloss.NewStyle().Foreground(lipgloss.Color("#FAFAF9"))
 
-	fmt.Println(themeTitle.Render("CPA Quota Inspector (Static Report)"))
+	fmt.Println(themeTitle.Render("CPA Quota Inspector"))
 	fmt.Println(themeSub.Render(fmt.Sprintf("source=%s  timeout=%s  retry=%d", cfg.BaseURL, cfg.Timeout.String(), cfg.RetryAttempts)))
 	fmt.Println()
 
@@ -60,15 +67,35 @@ func renderPrettyReport(reports []quotaReport, sum summary, cfg config) {
 		return
 	}
 
-	termWidth := detectTerminalWidth()
-	wName, wPlan, wStatus, wBar, wReset, wExtra := computeColumnWidths(termWidth)
+	for idx, section := range buildSections(reports) {
+		if idx > 0 {
+			fmt.Println()
+		}
+		fmt.Println(themeTitle.Render(section.Title))
+		switch section.Provider {
+		case "codex":
+			renderCodexSection(section.Reports, cfg, tableHeader, rowBase, rowAlt, themeDim)
+		case "gemini-cli":
+			renderGeminiSection(section.Reports, cfg, tableHeader, rowBase, rowAlt, themeDim)
+		default:
+			renderGenericSection(section.Reports, tableHeader, rowBase, rowAlt, themeDim)
+		}
+	}
 
+	fmt.Println()
+	fmt.Println(themeTitle.Render("Summary"))
+	renderSummaryTables(reports, sum, tableHeader, rowBase, themeDim)
+}
+
+func renderCodexSection(reports []quotaReport, cfg config, tableHeader, rowBase, rowAlt, themeDim lipgloss.Style) {
+	termWidth := detectTerminalWidth()
+	wName, wPlan, wStatus, wBar, wReset, wExtra := computeCodexWidths(termWidth)
 	header := padRight("File", wName) + " " +
 		padRight("Plan", wPlan) + " " +
 		padRight("Status", wStatus) + " " +
-		padRight("Code 5h", wBar) + " " +
+		padRight("5h", wBar) + " " +
 		padRight("Reset 5h", wReset) + " " +
-		padRight("Code 7d", wBar) + " " +
+		padRight("7d", wBar) + " " +
 		padRight("Reset 7d", wReset) + " " +
 		padRight("Extra", wExtra)
 	fmt.Println(tableHeader.Render(header))
@@ -77,39 +104,14 @@ func renderPrettyReport(reports []quotaReport, sum summary, cfg config) {
 	for i, report := range reports {
 		code5 := findWindow(report.Windows, "code-5h")
 		code7 := findWindow(report.Windows, "code-7d")
-
-		statusStyled := padRight(report.Status, wStatus)
-		switch report.Status {
-		case "full":
-			statusStyled = fullStyle.Render(statusStyled)
-		case "high":
-			statusStyled = highStyle.Render(statusStyled)
-		case "medium":
-			statusStyled = mediumStyle.Render(statusStyled)
-		case "low":
-			statusStyled = lowStyle.Render(statusStyled)
-		default:
-			statusStyled = errStyle.Render(statusStyled)
-		}
-
-		planText := defaultString(report.PlanType, "-")
-		planStyled := padRight(planText, wPlan)
-		switch strings.ToLower(strings.TrimSpace(planText)) {
-		case "plus":
-			planStyled = planPlus.Render(planStyled)
-		case "team":
-			planStyled = planTeam.Render(planStyled)
-		}
-
 		row := padRight(truncate(report.Name, wName), wName) + " " +
-			planStyled + " " +
-			statusStyled + " " +
+			stylePlan(report.PlanType).Render(padRight(defaultString(report.PlanType, "-"), wPlan)) + " " +
+			styleStatus(report.Status).Render(padRight(report.Status, wStatus)) + " " +
 			padRight(prettyBar(code5, wBar, cfg.ASCIIBars), wBar) + " " +
 			padRight(resetLabel(code5), wReset) + " " +
 			padRight(prettyBar(code7, wBar, cfg.ASCIIBars), wBar) + " " +
 			padRight(resetLabel(code7), wReset) + " " +
 			padRight(truncate(extraSummary(report.AdditionalWindows), wExtra), wExtra)
-
 		if i%2 == 0 {
 			fmt.Println(rowBase.Render(row))
 		} else {
@@ -119,27 +121,140 @@ func renderPrettyReport(reports []quotaReport, sum summary, cfg config) {
 			fmt.Println(themeDim.Render("  error: " + report.Error))
 		}
 	}
+}
 
-	fmt.Println()
-	fmt.Println(themeTitle.Render("Status Overview"))
-	overviewHeader := padRight("Accounts", 10) + " " + padRight("Full", 8) + " " + padRight("High", 8) + " " + padRight("Medium", 8) + " " + padRight("Low", 8) + " " + padRight("Exhausted", 10) + " " + padRight("Errors", 8)
-	fmt.Println(tableHeader.Render(overviewHeader))
-	fmt.Println(themeDim.Render(strings.Repeat("-", lipgloss.Width(overviewHeader))))
-	overviewLine := padRight(strconv.Itoa(sum.Accounts), 10) + " " +
-		fullStyle.Render(padRight(strconv.Itoa(sum.StatusCounts["full"]), 8)) + " " +
-		highStyle.Render(padRight(strconv.Itoa(sum.StatusCounts["high"]), 8)) + " " +
-		mediumStyle.Render(padRight(strconv.Itoa(sum.StatusCounts["medium"]), 8)) + " " +
-		lowStyle.Render(padRight(strconv.Itoa(sum.StatusCounts["low"]), 8)) + " " +
-		errStyle.Render(padRight(strconv.Itoa(sum.ExhaustedAccounts), 10)) + " " +
-		errStyle.Render(padRight(strconv.Itoa(sum.ErrorAccounts), 8))
-	fmt.Println(rowBase.Render(overviewLine))
+func renderGeminiSection(reports []quotaReport, cfg config, tableHeader, rowBase, rowAlt, themeDim lipgloss.Style) {
+	termWidth := detectTerminalWidth()
+	wName, wTier, wStatus := computeGeminiHeaderWidths(termWidth)
+	header := padRight("File", wName) + " " +
+		padRight("Tier", wTier) + " " +
+		padRight("Status", wStatus)
+	fmt.Println(tableHeader.Render(header))
+	fmt.Println(themeDim.Render(strings.Repeat("-", lipgloss.Width(header))))
 
-	fmt.Println()
-	fmt.Println(themeTitle.Render("Summary"))
-	fmt.Println(themeDim.Render("plan_counts: " + formatCountMap(sum.PlanCounts)))
-	fmt.Println(themeDim.Render("status_counts: " + formatCountMap(sum.StatusCounts)))
-	fmt.Println(themeDim.Render(fmt.Sprintf("free_equivalent_7d: %.0f%%", sum.FreeEquivalent7D)))
-	fmt.Println(themeDim.Render(fmt.Sprintf("plus_equivalent_7d: %.0f%%", sum.PlusEquivalent7D)))
+	for i, report := range reports {
+		row := padRight(truncate(report.Name, wName), wName) + " " +
+			padRight(truncate(defaultString(report.MetaFields["tier"], "-"), wTier), wTier) + " " +
+			styleStatus(report.Status).Render(padRight(report.Status, wStatus))
+		if i%2 == 0 {
+			fmt.Println(rowBase.Render(row))
+		} else {
+			fmt.Println(rowAlt.Render(row))
+		}
+		for _, window := range report.Windows {
+			barWidth := max(18, min(34, termWidth-44))
+			bar := prettyBar(&window, barWidth, cfg.ASCIIBars)
+			sub := "  " + padRight(truncate(window.Label, 28), 28) + " " + padRight(bar, barWidth) + " " + defaultString(window.ResetLabel, "-")
+			fmt.Println(themeDim.Render(sub))
+		}
+		if info := geminiSummary(report); info != "-" {
+			fmt.Println(themeDim.Render("  info: " + info))
+		}
+		if report.Error != "" {
+			fmt.Println(themeDim.Render("  error: " + report.Error))
+		}
+	}
+}
+
+func renderGenericSection(reports []quotaReport, tableHeader, rowBase, rowAlt, themeDim lipgloss.Style) {
+	header := padRight("File", 48) + " " + padRight("Status", 12) + " " + padRight("Plan", 16)
+	fmt.Println(tableHeader.Render(header))
+	fmt.Println(themeDim.Render(strings.Repeat("-", lipgloss.Width(header))))
+	for i, report := range reports {
+		row := padRight(truncate(report.Name, 48), 48) + " " +
+			styleStatus(report.Status).Render(padRight(report.Status, 12)) + " " +
+			padRight(defaultString(report.PlanType, "-"), 16)
+		if i%2 == 0 {
+			fmt.Println(rowBase.Render(row))
+		} else {
+			fmt.Println(rowAlt.Render(row))
+		}
+	}
+}
+
+func renderSummaryTables(reports []quotaReport, sum summary, tableHeader, rowBase, themeDim lipgloss.Style) {
+	sectionTitle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FDE68A"))
+	for idx, stats := range buildProviderSummaries(reports, sum) {
+		if idx > 0 {
+			fmt.Println()
+		}
+		fmt.Println(sectionTitle.Render(stats.Title))
+		metricWidth := 22
+		for _, row := range stats.Extras {
+			metricWidth = max(metricWidth, displayWidth(row.Label))
+		}
+		header := padRight("Metric", metricWidth) + " " + "Value"
+		fmt.Println(tableHeader.Render(header))
+		fmt.Println(themeDim.Render(strings.Repeat("-", lipgloss.Width(header))))
+		baseRows := []struct {
+			label string
+			value string
+		}{
+			{"Accounts", strconv.Itoa(stats.Accounts)},
+			{"Plans", formatCountMap(stats.Plans)},
+			{"Statuses", formatCountMap(stats.Statuses)},
+		}
+		for _, row := range baseRows {
+			fmt.Println(rowBase.Render(padRight(row.label, metricWidth) + " " + row.value))
+		}
+		for _, row := range stats.Extras {
+			fmt.Println(rowBase.Render(padRight(row.Label, metricWidth) + " " + row.Value))
+		}
+	}
+}
+
+func buildProviderSummaries(reports []quotaReport, sum summary) []providerSummary {
+	sections := buildSections(reports)
+	out := make([]providerSummary, 0, len(sections))
+	for _, section := range sections {
+		out = append(out, providerSummaryStats(section.Provider, section.Title, section.Reports, sum))
+	}
+	return out
+}
+
+func providerSummaryStats(provider string, title string, reports []quotaReport, sum summary) providerSummary {
+	stats := providerSummary{
+		Provider: provider,
+		Title:    title,
+		Accounts: len(reports),
+		Plans:    map[string]int{},
+		Statuses: map[string]int{},
+	}
+	for _, report := range reports {
+		plan := report.PlanType
+		if plan == "" {
+			plan = "unknown"
+		}
+		stats.Plans[plan]++
+		status := report.Status
+		if status == "" {
+			status = "unknown"
+		}
+		stats.Statuses[status]++
+	}
+	switch provider {
+	case "codex":
+		stats.Extras = append(stats.Extras,
+			providerSummaryRow{Label: "Free Equivalent 7d", Value: fmt.Sprintf("%.0f%%", sum.FreeEquivalent7D)},
+			providerSummaryRow{Label: "Plus Equivalent 7d", Value: fmt.Sprintf("%.0f%%", sum.PlusEquivalent7D)},
+		)
+	case "gemini-cli":
+		if len(sum.GeminiEquivalents) == 0 {
+			break
+		}
+		keys := make([]string, 0, len(sum.GeminiEquivalents))
+		for key := range sum.GeminiEquivalents {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			stats.Extras = append(stats.Extras, providerSummaryRow{
+				Label: key + " Equivalent",
+				Value: fmt.Sprintf("%.0f%%", sum.GeminiEquivalents[key]),
+			})
+		}
+	}
+	return stats
 }
 
 func detectTerminalWidth() int {
@@ -156,9 +271,9 @@ func isStdoutTerminal() bool {
 	return term.IsTerminal(int(os.Stdout.Fd()))
 }
 
-func computeColumnWidths(total int) (int, int, int, int, int, int) {
-	if total < 96 {
-		total = 96
+func computeCodexWidths(total int) (int, int, int, int, int, int) {
+	if total < 100 {
+		total = 100
 	}
 	wPlan, wStatus, wReset := 8, 10, 12
 	wName, wExtra, wBar := 28, 18, 22
@@ -199,14 +314,48 @@ func computeColumnWidths(total int) (int, int, int, int, int, int) {
 	return wName, wPlan, wStatus, wBar, wReset, wExtra
 }
 
+func computeGeminiHeaderWidths(total int) (int, int, int) {
+	if total < 70 {
+		total = 70
+	}
+	wName, wTier, wStatus := 34, 24, 10
+	switch {
+	case total >= 140:
+		wName, wTier = 48, 28
+	case total >= 110:
+		wName, wTier = 36, 24
+	default:
+		wName, wTier = 24, 18
+	}
+	for {
+		current := wName + wTier + wStatus + 2
+		if current <= total {
+			return wName, wTier, wStatus
+		}
+		if wTier > 14 {
+			wTier--
+			continue
+		}
+		if wName > 18 {
+			wName--
+			continue
+		}
+		return wName, wTier, wStatus
+	}
+}
+
 func prettyBar(window *quotaWindow, width int, ascii bool) string {
 	if window == nil || window.RemainingPercent == nil {
 		return "-"
 	}
+	return prettyPercentBar(*window.RemainingPercent, width, ascii)
+}
+
+func prettyPercentBar(value float64, width int, ascii bool) string {
 	if width < 8 {
-		return fmt.Sprintf("%3.0f%%", clampFloat(*window.RemainingPercent, 0, 100))
+		return fmt.Sprintf("%3.0f%%", clampFloat(value, 0, 100))
 	}
-	v := clampFloat(*window.RemainingPercent, 0, 100)
+	v := clampFloat(value, 0, 100)
 	percent := fmt.Sprintf(" %3.0f%%", v)
 	barArea := width - displayWidth(percent) - 2
 	if barArea < 4 {
@@ -216,27 +365,24 @@ func prettyBar(window *quotaWindow, width int, ascii bool) string {
 	if filled > barArea {
 		filled = barArea
 	}
-	unfilledStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#57534E"))
+	unfilledStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#A8A29E"))
 	percentStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(colorAtPercent(v))).Bold(true)
 	if ascii {
 		var b strings.Builder
 		for i := 0; i < filled; i++ {
-			posPct := (float64(i+1) / float64(max(1, barArea))) * 100
-			segStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(colorAtPercent(posPct)))
+			segStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(colorAtPercent(segmentPercent(i, barArea))))
 			b.WriteString(segStyle.Render("="))
 		}
-		body := b.String()
 		if filled < barArea {
-			arrowPct := (float64(max(1, filled)) / float64(max(1, barArea))) * 100
-			body += lipgloss.NewStyle().Foreground(lipgloss.Color(colorAtPercent(arrowPct))).Render(">")
-			body += unfilledStyle.Render(strings.Repeat(".", max(0, barArea-filled-1)))
+			segStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(colorAtPercent(segmentPercent(max(0, filled), barArea))))
+			b.WriteString(segStyle.Render(">"))
+			b.WriteString(unfilledStyle.Render(strings.Repeat(".", max(0, barArea-filled-1))))
 		}
-		return "[" + body + "]" + percentStyle.Render(percent)
+		return "[" + b.String() + "]" + percentStyle.Render(percent)
 	}
 	var b strings.Builder
 	for i := 0; i < filled; i++ {
-		posPct := (float64(i+1) / float64(max(1, barArea))) * 100
-		segStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(colorAtPercent(posPct)))
+		segStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(colorAtPercent(segmentPercent(i, barArea))))
 		b.WriteString(segStyle.Render("█"))
 	}
 	b.WriteString(unfilledStyle.Render(strings.Repeat("░", max(0, barArea-filled))))
@@ -269,4 +415,58 @@ func asciiProgress(value *float64, width int) string {
 		filled = width
 	}
 	return "[" + strings.Repeat("#", filled) + strings.Repeat("-", width-filled) + fmt.Sprintf("] %3.0f%%", v)
+}
+
+func stylePlan(plan string) lipgloss.Style {
+	switch strings.ToLower(strings.TrimSpace(plan)) {
+	case "plus":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#60A5FA"))
+	case "team":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#FACC15"))
+	default:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F5F4"))
+	}
+}
+
+func styleStatus(status string) lipgloss.Style {
+	return styleSeverity(status).Bold(true)
+}
+
+func styleSeverity(severity string) lipgloss.Style {
+	switch strings.ToLower(strings.TrimSpace(severity)) {
+	case "full":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#65A30D"))
+	case "high", "ok":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#16A34A"))
+	case "medium":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#38BDF8"))
+	case "low", "limited":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#D97706"))
+	case "exhausted", "error":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#DC2626"))
+	case "unknown", "missing", "muted":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#A8A29E"))
+	default:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F5F4"))
+	}
+}
+
+func geminiSummary(report quotaReport) string {
+	parts := []string{}
+	for _, key := range []string{"channel", "project", "paid_tier"} {
+		if value := strings.TrimSpace(report.MetaFields[key]); value != "" {
+			parts = append(parts, value)
+		}
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, " | ")
+}
+
+func segmentPercent(index, total int) float64 {
+	if total <= 1 {
+		return 100
+	}
+	return clampFloat((float64(index+1)/float64(total))*100, 0, 100)
 }
