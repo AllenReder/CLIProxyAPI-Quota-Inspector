@@ -23,11 +23,22 @@ type authTask struct {
 	Entry    authEntry
 }
 
+type runtimeState struct {
+	client        *http.Client
+	apiCallSem    chan struct{}
+	authFilesOnce sync.Once
+	authFiles     []map[string]any
+	authFilesErr  error
+}
+
 func queryAllQuotas(ctx context.Context, cfg config, tasks []authTask, showProgress bool) ([]quotaReport, error) {
 	if len(tasks) == 0 {
 		return []quotaReport{}, nil
 	}
-	client := &http.Client{Timeout: cfg.Timeout}
+	if cfg.Runtime == nil {
+		cfg.Runtime = newRuntimeState(cfg)
+	}
+	client := managementHTTPClient(cfg)
 	reports := make([]quotaReport, len(tasks))
 	errCh := make(chan error, len(tasks))
 	progressCh := make(chan string, len(tasks))
@@ -107,19 +118,7 @@ func renderFetchProgress(done, total int, current string) {
 }
 
 func fetchJSON(ctx context.Context, client *http.Client, cfg config, url string) (map[string]any, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	if cfg.ManagementKey != "" {
-		req.Header.Set("Authorization", "Bearer "+cfg.ManagementKey)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	return decodeResponse(resp)
+	return doJSONRequest(ctx, client, cfg, http.MethodGet, url, nil)
 }
 
 func postJSON(ctx context.Context, client *http.Client, cfg config, url string, payload map[string]any) (map[string]any, error) {
@@ -127,20 +126,7 @@ func postJSON(ctx context.Context, client *http.Client, cfg config, url string, 
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
-	}
-	if cfg.ManagementKey != "" {
-		req.Header.Set("Authorization", "Bearer "+cfg.ManagementKey)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	return decodeResponse(resp)
+	return doJSONRequest(ctx, client, cfg, http.MethodPost, url, raw)
 }
 
 func decodeResponse(resp *http.Response) (map[string]any, error) {
@@ -156,6 +142,176 @@ func decodeResponse(resp *http.Response) (map[string]any, error) {
 		return nil, err
 	}
 	return payload, nil
+}
+
+func newRuntimeState(cfg config) *runtimeState {
+	limit := cfg.MgmtConcurrency
+	if limit < 1 {
+		limit = defaultMgmtConcurrency
+	}
+	return &runtimeState{
+		client:     newManagementHTTPClient(cfg.Timeout, max(cfg.Concurrency*2, limit*2)),
+		apiCallSem: make(chan struct{}, limit),
+	}
+}
+
+func newManagementHTTPClient(timeout time.Duration, maxConnsPerHost int) *http.Client {
+	if maxConnsPerHost < 32 {
+		maxConnsPerHost = 32
+	}
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		MaxIdleConns:          max(128, maxConnsPerHost*2),
+		MaxIdleConnsPerHost:   max(64, maxConnsPerHost),
+		MaxConnsPerHost:       maxConnsPerHost,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ForceAttemptHTTP2:     true,
+	}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+	}
+}
+
+func managementHTTPClient(cfg config) *http.Client {
+	if cfg.Runtime != nil && cfg.Runtime.client != nil {
+		return cfg.Runtime.client
+	}
+	return newManagementHTTPClient(cfg.Timeout, max(cfg.Concurrency*2, defaultMgmtConcurrency*2))
+}
+
+func doJSONRequest(ctx context.Context, client *http.Client, cfg config, method, url string, body []byte) (map[string]any, error) {
+	if client == nil {
+		client = managementHTTPClient(cfg)
+	}
+	isAPICall := isManagementAPICallURL(url)
+	attempts := 1
+	if isAPICall {
+		attempts = cfg.RetryAttempts
+		if attempts < 1 {
+			attempts = 1
+		}
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := acquireAPICallSlot(ctx, cfg, isAPICall); err != nil {
+			return nil, err
+		}
+		respPayload, err := func() (map[string]any, error) {
+			defer releaseAPICallSlot(cfg, isAPICall)
+			var reader io.Reader
+			if len(body) > 0 {
+				reader = bytes.NewReader(body)
+			}
+			req, err := http.NewRequestWithContext(ctx, method, url, reader)
+			if err != nil {
+				return nil, err
+			}
+			if cfg.ManagementKey != "" {
+				req.Header.Set("Authorization", "Bearer "+cfg.ManagementKey)
+			}
+			if method == http.MethodPost {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				return nil, err
+			}
+			defer resp.Body.Close()
+			return decodeResponse(resp)
+		}()
+		if err == nil {
+			return respPayload, nil
+		}
+		lastErr = err
+		if !isAPICall || attempt == attempts || !shouldRetryError(err.Error()) {
+			break
+		}
+		if waitErr := sleepBeforeRetry(ctx, attempt); waitErr != nil {
+			return nil, waitErr
+		}
+	}
+	return nil, lastErr
+}
+
+func isManagementAPICallURL(url string) bool {
+	return strings.Contains(url, "/v0/management/api-call")
+}
+
+func acquireAPICallSlot(ctx context.Context, cfg config, enabled bool) error {
+	if !enabled || cfg.Runtime == nil || cfg.Runtime.apiCallSem == nil {
+		return nil
+	}
+	select {
+	case cfg.Runtime.apiCallSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func releaseAPICallSlot(cfg config, enabled bool) {
+	if !enabled || cfg.Runtime == nil || cfg.Runtime.apiCallSem == nil {
+		return
+	}
+	select {
+	case <-cfg.Runtime.apiCallSem:
+	default:
+	}
+}
+
+func sleepBeforeRetry(ctx context.Context, attempt int) error {
+	if attempt < 1 {
+		attempt = 1
+	}
+	delay := 200 * time.Millisecond
+	for i := 1; i < attempt; i++ {
+		delay *= 2
+		if delay >= 2*time.Second {
+			delay = 2 * time.Second
+			break
+		}
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func loadAuthFiles(ctx context.Context, cfg config) ([]map[string]any, error) {
+	if cfg.Runtime == nil {
+		cfg.Runtime = newRuntimeState(cfg)
+	}
+	cfg.Runtime.authFilesOnce.Do(func() {
+		payload, err := fetchJSON(ctx, managementHTTPClient(cfg), cfg, cfg.BaseURL+"/v0/management/auth-files")
+		if err != nil {
+			cfg.Runtime.authFilesErr = err
+			return
+		}
+		files, ok := payload["files"].([]any)
+		if !ok {
+			cfg.Runtime.authFilesErr = fmt.Errorf("unexpected auth-files payload from CPA management API")
+			return
+		}
+		out := make([]map[string]any, 0, len(files))
+		for _, item := range files {
+			entry, ok := item.(map[string]any)
+			if ok {
+				out = append(out, entry)
+			}
+		}
+		cfg.Runtime.authFiles = out
+	})
+	if cfg.Runtime.authFilesErr != nil {
+		return nil, cfg.Runtime.authFilesErr
+	}
+	return cfg.Runtime.authFiles, nil
 }
 
 func parseBody(body any) (map[string]any, error) {

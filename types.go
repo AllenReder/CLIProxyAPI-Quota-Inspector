@@ -10,6 +10,7 @@ const (
 	defaultCPABaseURL      = "http://127.0.0.1:8317"
 	defaultTimeoutSeconds  = 30
 	defaultRetryAttempts   = 3
+	defaultMgmtConcurrency = 64
 	window5HSeconds        = 5 * 60 * 60
 	window7DSeconds        = 7 * 24 * 60 * 60
 	whamUsageURL           = "https://chatgpt.com/backend-api/wham/usage"
@@ -27,20 +28,22 @@ var whamHeaders = map[string]string{
 }
 
 type config struct {
-	BaseURL        string
-	ManagementKey  string
-	ShowVersion    bool
-	JSON           bool
-	Plain          bool
-	SummaryOnly    bool
-	ASCIIBars      bool
-	NoProgress     bool
-	FilterProvider string
-	FilterPlan     string
-	FilterStatus   string
-	Concurrency    int
-	Timeout        time.Duration
-	RetryAttempts  int
+	BaseURL         string
+	ManagementKey   string
+	ShowVersion     bool
+	JSON            bool
+	Plain           bool
+	SummaryOnly     bool
+	ASCIIBars       bool
+	NoProgress      bool
+	FilterProvider  string
+	FilterPlan      string
+	FilterStatus    string
+	Concurrency     int
+	MgmtConcurrency int
+	Timeout         time.Duration
+	RetryAttempts   int
+	Runtime         *runtimeState
 }
 
 type quotaWindow struct {

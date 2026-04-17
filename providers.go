@@ -70,21 +70,12 @@ type namedModelGroup struct {
 }
 
 func loadProviderAuths(ctx context.Context, cfg config, provider string) ([]authEntry, error) {
-	client := &http.Client{Timeout: cfg.Timeout}
-	payload, err := fetchJSON(ctx, client, cfg, cfg.BaseURL+"/v0/management/auth-files")
+	files, err := loadAuthFiles(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-	files, ok := payload["files"].([]any)
-	if !ok {
-		return nil, fmt.Errorf("unexpected auth-files payload from CPA management API")
-	}
 	out := make([]authEntry, 0, len(files))
-	for _, item := range files {
-		entry, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
+	for _, entry := range files {
 		current := normalizePlan(firstValue(entry["provider"], entry["type"]))
 		if current != provider {
 			continue
@@ -135,6 +126,10 @@ func queryCodexQuota(ctx context.Context, client *http.Client, cfg config, entry
 			if attempt == cfg.RetryAttempts || !shouldRetryError(lastErr) {
 				break
 			}
+			if waitErr := sleepBeforeRetry(ctx, attempt); waitErr != nil {
+				lastErr = waitErr.Error()
+				break
+			}
 			continue
 		}
 		statusCode := intFromAny(firstValue(response["status_code"], response["statusCode"]))
@@ -148,11 +143,19 @@ func queryCodexQuota(ctx context.Context, client *http.Client, cfg config, entry
 			if attempt == cfg.RetryAttempts || !shouldRetryError(lastErr) {
 				break
 			}
+			if waitErr := sleepBeforeRetry(ctx, attempt); waitErr != nil {
+				lastErr = waitErr.Error()
+				break
+			}
 			continue
 		}
 		if parseErr != nil {
 			lastErr = "empty or invalid quota payload"
 			if attempt == cfg.RetryAttempts {
+				break
+			}
+			if waitErr := sleepBeforeRetry(ctx, attempt); waitErr != nil {
+				lastErr = waitErr.Error()
 				break
 			}
 			continue
@@ -277,6 +280,10 @@ func queryGoogleQuotaProvider(ctx context.Context, client *http.Client, cfg conf
 		if err != nil {
 			lastErr = err.Error()
 			if attempt == cfg.RetryAttempts || !shouldRetryError(lastErr) {
+				break
+			}
+			if waitErr := sleepBeforeRetry(ctx, attempt); waitErr != nil {
+				lastErr = waitErr.Error()
 				break
 			}
 			continue

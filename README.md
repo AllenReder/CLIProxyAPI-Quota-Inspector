@@ -50,7 +50,8 @@ The default CPA endpoint is `http://127.0.0.1:8317`.
 
 - `-k`, `--management-key`: CPA management key
 - `--cpa-base-url`: CPA base URL, default `http://127.0.0.1:8317`
-- `--concurrency`: concurrent workers, default `32`
+- `--concurrency`: concurrent workers, default `128`
+- `--management-concurrency`: concurrent `/v0/management/api-call` requests, default `64`
 - `--timeout`: request timeout in seconds
 - `--retry-attempts`: retry count after failed queries
 - `--filter-provider`: show only the specified provider
@@ -100,6 +101,15 @@ Print JSON:
 ```bash
 ./cpa-quota-inspector \
   --json \
+  -k YOUR_MANAGEMENT_KEY
+```
+
+Run a larger batch with explicit concurrency:
+
+```bash
+./cpa-quota-inspector \
+  --concurrency 128 \
+  --management-concurrency 64 \
   -k YOUR_MANAGEMENT_KEY
 ```
 

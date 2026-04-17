@@ -59,7 +59,7 @@ func renderPrettyReport(reports []quotaReport, sum summary, cfg config) {
 	rowBase := lipgloss.NewStyle().Foreground(lipgloss.Color("#FAFAF9"))
 
 	fmt.Println(themeTitle.Render("CPA Quota Inspector"))
-	fmt.Println(themeSub.Render(fmt.Sprintf("source=%s  timeout=%s  retry=%d", cfg.BaseURL, cfg.Timeout.String(), cfg.RetryAttempts)))
+	fmt.Println(themeSub.Render(fmt.Sprintf("source=%s  timeout=%s  retry=%d  concurrency=%d/%d", cfg.BaseURL, cfg.Timeout.String(), cfg.RetryAttempts, cfg.Concurrency, cfg.MgmtConcurrency)))
 	fmt.Println()
 
 	if len(reports) == 0 {

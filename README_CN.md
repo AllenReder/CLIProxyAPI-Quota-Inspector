@@ -50,7 +50,8 @@ go build -o cpa-quota-inspector .
 
 - `-k`, `--management-key`: CPA management key
 - `--cpa-base-url`: CPA 地址，默认 `http://127.0.0.1:8317`
-- `--concurrency`: 并发查询数，默认 `32`
+- `--concurrency`: 总并发查询数，默认 `128`
+- `--management-concurrency`: `/v0/management/api-call` 并发数，默认 `64`
 - `--timeout`: 请求超时秒数
 - `--retry-attempts`: 查询失败后的重试次数
 - `--filter-provider`: 仅查看指定 provider
@@ -100,6 +101,15 @@ go build -o cpa-quota-inspector .
 ```bash
 ./cpa-quota-inspector \
   --json \
+  -k YOUR_MANAGEMENT_KEY
+```
+
+大批量查询时显式指定并发：
+
+```bash
+./cpa-quota-inspector \
+  --concurrency 128 \
+  --management-concurrency 64 \
   -k YOUR_MANAGEMENT_KEY
 ```
 
